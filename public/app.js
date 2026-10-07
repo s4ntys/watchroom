@@ -5,7 +5,10 @@ const landing = $('landing');
 const roomPanel = $('room');
 const peers = new Map();
 const iceQueue = new Map();
-const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+// For reliable cross-network streaming configure a real TURN service on deployment.
+// This client optionally accepts a JSON RTC configuration set in window.WATCHROOM_RTC_CONFIG.
+if (window.WATCHROOM_RTC_CONFIG?.iceServers) rtcConfig.iceServers = window.WATCHROOM_RTC_CONFIG.iceServers;
 let roomId = new URLSearchParams(location.search).get('room');
 let hostToken = null;
 let role = 'viewer';
@@ -13,6 +16,21 @@ let localStream = null;
 let objectUrl = null;
 let sourceKind = null;
 let joining = false;
+let retryTimer = null;
+let retryCount = 0;
+function unlockPlayback() {
+  $('watchButton').classList.add('hidden');
+  player.muted = false;
+  player.play().catch(() => { $('watchButton').classList.remove('hidden'); status('Klikni na Spustiť sledovanie.'); });
+}
+function offerRetry() {
+  if (isHost() || retryTimer || retryCount >= 3 || !socket.connected) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null; retryCount++;
+    status(`Obnovujem WebRTC spojenie (${retryCount}/3)…`);
+    closeAllPeers(); socket.emit('request-stream');
+  }, 2500);
+}
 
 function notify(message) { $('error').textContent = message; $('error').classList.remove('hidden'); setTimeout(() => $('error').classList.add('hidden'), 8500); }
 function status(message) { $('status').textContent = message; }
@@ -29,6 +47,7 @@ function showRoom() {
 }
 function setLive(live) {
   $('empty').classList.toggle('hidden', live);
+  if (!live) $('watchButton').classList.add('hidden');
   $('liveBadge').classList.toggle('hidden', !live);
 }
 function linkForRoom() { return `${location.origin}/?room=${encodeURIComponent(roomId)}`; }
@@ -69,15 +88,31 @@ function makePeer(id) {
   iceQueue.set(id, pending);
   peer.onicecandidate = evt => { if (evt.candidate) socket.emit('signal', { target: id, data: { type: 'candidate', candidate: evt.candidate } }); };
   peer.onconnectionstatechange = () => {
-    if (peer.connectionState === 'failed') status('P2P pripojenie zlyhalo. Možno bude potrebný TURN server.');
+    const state = peer.connectionState;
+    console.info('WebRTC connection', id, state);
+    if (state === 'connected') {
+      retryCount = 0; clearTimeout(retryTimer); retryTimer = null;
+      if (!isHost()) status('WebRTC spojené • stream pripojený');
+    } else if (state === 'failed') {
+      status('WebRTC spojenie zlyhalo – na rôznych sieťach je často nutný TURN server.');
+      offerRetry();
+    } else if (state === 'disconnected' && !isHost()) {
+      status('WebRTC spojenie bolo prerušené. Skúšam obnovu…');
+      offerRetry();
+    }
   };
+  peer.oniceconnectionstatechange = () => console.info('ICE connection', id, peer.iceConnectionState);
   if (isHost() && localStream) localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
   if (!isHost()) {
     peer.ontrack = event => {
       const stream = event.streams[0] || new MediaStream([event.track]);
       if (player.srcObject !== stream) player.srcObject = stream;
-      setLive(true); status('Sleduješ živé vysielanie');
-      player.play().catch(() => status('Klikni na prehrávač pre spustenie zvuku / videa.'));
+      setLive(true); status('Stream dorazil • pripájam prehrávanie…');
+      player.autoplay = true; player.playsInline = true;
+      player.play().then(() => { $('watchButton').classList.add('hidden'); }).catch(() => {
+        $('watchButton').classList.remove('hidden');
+        status('Prehliadač zablokoval automatické prehrávanie. Klikni na Spustiť sledovanie.');
+      });
     };
   }
   return peer;
@@ -96,6 +131,7 @@ async function offerToViewer(viewerId) {
 }
 async function startStream(stream, kind) {
   if (!stream?.getVideoTracks().length) throw Error('Zdroj neobsahuje video.');
+  if (stream.getVideoTracks().every(t => t.readyState === 'ended')) throw Error('Video stopa sa ukončila pred začiatkom vysielania.');
   if (localStream) stopStream(false);
   localStream = stream; sourceKind = kind;
   for (const track of stream.getTracks()) track.addEventListener('ended', () => {
@@ -151,11 +187,12 @@ async function shareScreen() {
 }
 
 socket.on('connect', () => { if (roomId) joinRoom(); });
-socket.on('disconnect', () => { closeAllPeers(); status('Spojenie so serverom prerušené…'); });
+socket.on('disconnect', () => { clearTimeout(retryTimer); retryTimer = null; closeAllPeers(); status('Spojenie so serverom prerušené…'); });
 socket.on('room-state', state => { $('count').textContent = state.viewers; if (!isHost() && !state.live) { setLive(false); player.srcObject = null; } });
 socket.on('viewer-joined', ({ viewerId }) => { if (isHost() && localStream) offerToViewer(viewerId).catch(e => notify(e.message)); });
 socket.on('viewer-left', ({ viewerId }) => closePeer(viewerId));
 socket.on('playback-status', ({ live }) => {
+  if (live && !isHost()) { retryCount = 0; }
   if (!isHost() && !live) { setLive(false); player.srcObject = null; closeAllPeers(); status('Moderátor zastavil vysielanie'); }
   if (!isHost() && live && !player.srcObject) socket.emit('request-stream');
 });
@@ -184,6 +221,7 @@ socket.on('signal', async ({ from, data }) => {
     }
   } catch (error) { console.error(error); status('Chyba pri nadväzovaní video spojenia'); }
 });
+$('watchButton').onclick = unlockPlayback;
 $('create').onclick = createRoom;
 $('createTop').onclick = createRoom;
 $('copy').onclick = async () => { try { await navigator.clipboard.writeText(linkForRoom()); $('copy').textContent = '✓ Skopírované'; setTimeout(() => $('copy').textContent = '⧉ Kopírovať pozvánku', 2200); } catch { notify('Odkaz: ' + linkForRoom()); } };

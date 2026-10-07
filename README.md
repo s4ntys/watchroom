@@ -30,3 +30,13 @@ Funkčný prototyp spoločného sledovania bez účtov alebo chatu. Zakladateľ 
 - `public/index.html`: UI
 - `public/style.css`: dizajn
 - `public/app.js`: WebRTC, video capture, ovládanie
+
+
+## Ak divák vidí čiernu obrazovku
+1. Obnov stránku hosta aj diváka (Ctrl+F5). Host spustí vysielanie znova.
+2. Divák klikne na **Spustiť sledovanie**, ak sa zobrazí. Prehliadač môže blokovať autoplay so zvukom.
+3. Skúste Chrome/Edge a najprv vysielanie karty so zapnutým zdieľaním zvuku.
+4. Otvorte F12 > Console: hľadajte `WebRTC connection` a `ICE connection`. Ak je `failed`, spojenie cez STUN neprejde – produkčné nasadenie potrebuje TURN server so správnymi prihlasovacími údajmi.
+5. WebRTC prenos medzi rôznymi sieťami nie je bez TURN servera garantovaný. Hosting Render zabezpečuje signalizáciu, nie video relaying.
+
+Upozornenie: Táto opravná verzia pridáva diagnostiku, možnosť ručného spustenia prehrávača a obmedzené opakovanie spojenia. Neobsahuje TURN server ani jeho prihlasovacie údaje.
